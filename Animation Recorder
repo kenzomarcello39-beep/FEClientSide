@@ -1,0 +1,277 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+
+character.Archivable = true
+for _, v in ipairs(character:GetDescendants()) do v.Archivable = true end
+
+-- ========================== GUI ==========================
+local screenGui = Instance.new("ScreenGui")
+screenGui.ResetOnSpawn = false
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 260, 0, 120)
+frame.Position = UDim2.new(0, 20, 0, 20)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+frame.Parent = screenGui
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 35)
+title.BackgroundTransparency = 1
+title.Text = "R6 RECORDER - FIXED v5"
+title.TextColor3 = Color3.new(1,1,1)
+title.TextScaled = true
+title.Parent = frame
+
+local toggle = Instance.new("TextButton")
+toggle.Size = UDim2.new(0.9, 0, 0, 60)
+toggle.Position = UDim2.new(0.05, 0, 0.35, 0)
+toggle.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
+toggle.Text = "START RECORDING"
+toggle.TextColor3 = Color3.new(1,1,1)
+toggle.TextScaled = true
+toggle.Parent = frame
+
+-- ========================== RECORDING ==========================
+local recording = false
+local keyframes = {}
+local startTime = 0
+local recordConnection = nil
+
+local function solveTransform(desiredCF, motor)
+	if not motor or not motor.Part0 then return CFrame.new() end
+	local C0 = motor.C0
+	local C1 = motor.C1
+	local Part0CF = motor.Part0.CFrame
+	return C0:Inverse() * Part0CF:Inverse() * desiredCF * C1
+end
+
+local function recordFrame()
+	if not recording or not character or not character.Parent then return end
+	
+	local keyframe = Instance.new("Keyframe")
+	keyframe.Time = tick() - startTime
+	
+	local rootPose = Instance.new("Pose")
+	rootPose.Name = "HumanoidRootPart"
+	rootPose.CFrame = CFrame.new()
+	rootPose.Weight = 1
+	
+	local rootJoint = character.HumanoidRootPart:FindFirstChild("RootJoint")
+	local torsoPose = Instance.new("Pose")
+	torsoPose.Name = "Torso"
+	torsoPose.CFrame = solveTransform(character.Torso.CFrame, rootJoint)
+	torsoPose.Weight = 1
+	torsoPose.Parent = rootPose
+	
+	local limbData = {
+		{partName = "Head",          motorName = "Neck"},
+		{partName = "Left Arm",      motorName = "Left Shoulder"},
+		{partName = "Right Arm",     motorName = "Right Shoulder"},
+		{partName = "Left Leg",      motorName = "Left Hip"},
+		{partName = "Right Leg",     motorName = "Right Hip"}
+	}
+	
+	for _, data in ipairs(limbData) do
+		local part = character:FindFirstChild(data.partName)
+		local motor = character.Torso:FindFirstChild(data.motorName)
+		if part and motor then
+			local pose = Instance.new("Pose")
+			pose.Name = data.partName
+			pose.CFrame = solveTransform(part.CFrame, motor)
+			pose.Weight = 1
+			pose.EasingStyle = Enum.PoseEasingStyle.Linear
+			pose.EasingDirection = Enum.PoseEasingDirection.Out
+			pose.Parent = torsoPose
+		end
+	end
+	
+	rootPose.Parent = keyframe
+	table.insert(keyframes, keyframe)
+end
+
+-- ========================== TOGGLE ==========================
+toggle.MouseButton1Click:Connect(function()
+	recording = not recording
+	
+	if recording then
+		keyframes = {}
+		startTime = tick()
+		toggle.Text = "STOP RECORDING"
+		toggle.BackgroundColor3 = Color3.fromRGB(40, 180, 40)
+		recordConnection = RunService.Heartbeat:Connect(recordFrame)
+		print("🔴 Recording started...")
+	else
+		if recordConnection then
+			recordConnection:Disconnect()
+			recordConnection = nil
+		end
+		toggle.Text = "START RECORDING"
+		toggle.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
+		
+		if #keyframes < 5 then
+			warn("Record longer!")
+			return
+		end
+		
+		local ks = Instance.new("KeyframeSequence")
+		ks.Name = "R6_Recorded_" .. os.date("%H%M%S")
+		ks.Loop = true
+		ks.Priority = Enum.AnimationPriority.Action
+		ks.Archivable = true
+		
+		for _, kf in ipairs(keyframes) do kf.Parent = ks end
+		
+		local folder = workspace:FindFirstChild("R6Recordings") or Instance.new("Folder")
+		folder.Name = "R6Recordings"
+		folder.Parent = workspace
+		ks.Parent = folder
+		
+		print("✅ Saved to workspace.R6Recordings")
+		
+		local animator = humanoid:FindFirstChild("Animator")
+		if animator then animator:Destroy() end
+		
+		-- Test Clone
+		local clone = character:Clone()
+		clone.Name = "TestClone_" .. ks.Name
+		clone.Parent = workspace
+		
+		local root = clone:FindFirstChild("HumanoidRootPart")
+		if root then root.CFrame = character.HumanoidRootPart.CFrame * CFrame.new(8, 0, 0) end
+		
+		for _, m in ipairs(clone:GetDescendants()) do
+			if m:IsA("Motor6D") then
+				m.Enabled = true
+				m.Transform = CFrame.new()
+			end
+		end
+		
+		local playback = PlayKeyframeSequence(clone, ks, 1.0)
+		if playback then
+			playback:Play()
+			
+			-- Clean up clone when animation actually ends
+			task.delay(playback.Length + 0.5, function()
+				if clone and clone.Parent then clone:Destroy() end
+			end)
+		end
+		
+		print("▶ Playing on clone | Press R to replay")
+	end
+end)
+
+-- ========================== PLAYBACK ==========================
+local TweenService = game:GetService("TweenService")
+
+local EasingStyleMap = {
+	[Enum.PoseEasingStyle.Linear] = Enum.EasingStyle.Linear,
+	[Enum.PoseEasingStyle.Bounce] = Enum.EasingStyle.Bounce,
+	[Enum.PoseEasingStyle.Cubic] = Enum.EasingStyle.Cubic,
+	[Enum.PoseEasingStyle.Elastic] = Enum.EasingStyle.Elastic,
+	[Enum.PoseEasingStyle.Constant] = Enum.EasingStyle.Linear,
+}
+
+local EasingDirectionMap = {
+	[Enum.PoseEasingDirection.In] = Enum.EasingDirection.In,
+	[Enum.PoseEasingDirection.Out] = Enum.EasingDirection.Out,
+	[Enum.PoseEasingDirection.InOut] = Enum.EasingDirection.InOut,
+}
+
+function PlayKeyframeSequence(Model, KeyframeSequence, SpeedMult)
+	SpeedMult = SpeedMult or 1
+	
+	local kfs = {}
+	for _, kf in ipairs(KeyframeSequence:GetKeyframes()) do
+		table.insert(kfs, {Time = kf.Time, KF = kf})
+	end
+	table.sort(kfs, function(a,b) return a.Time < b.Time end)
+	
+	if #kfs == 0 then return nil end
+	
+	local jointData = {}
+	local motorMap = {}
+	
+	local function getMotor(poseName)
+		if motorMap[poseName] then return motorMap[poseName] end
+		for _, m in ipairs(Model:GetDescendants()) do
+			if m:IsA("Motor6D") and m.Part1 and m.Part1.Name == poseName then
+				motorMap[poseName] = m
+				return m
+			end
+		end
+		return nil
+	end
+	
+	for _, entry in ipairs(kfs) do
+		for _, pose in ipairs(entry.KF:GetDescendants()) do
+			if pose:IsA("Pose") and pose.Weight > 0 then
+				local motor = getMotor(pose.Name)
+				if motor then
+					if not jointData[pose.Name] then jointData[pose.Name] = {} end
+					table.insert(jointData[pose.Name], {
+						time = entry.Time,
+						cframe = pose.CFrame,
+						style = pose.EasingStyle,
+						dir = pose.EasingDirection,
+						motor = motor
+					})
+				end
+			end
+		end
+	end
+	
+	local totalLen = kfs[#kfs].Time / SpeedMult
+	local playing = true
+	local startT = os.clock()
+	local hb = nil
+	
+	hb = RunService.Heartbeat:Connect(function()
+		if not playing or not Model or not Model.Parent then
+			if hb then hb:Disconnect() end
+			return
+		end
+		
+		local t = ((os.clock() - startT) * SpeedMult) % totalLen
+		
+		for _, poses in pairs(jointData) do
+			if #poses == 0 then continue end
+			
+			local prev = poses[1]
+			local nxt = poses[1]
+			for i = 1, #poses-1 do
+				if t >= poses[i].time and t < poses[i+1].time then
+					prev = poses[i]
+					nxt = poses[i+1]
+					break
+				end
+			end
+			if t >= poses[#poses].time then
+				prev = poses[#poses]
+				nxt = poses[#poses]
+			end
+			
+			local alpha = (nxt.time > prev.time) and (t - prev.time)/(nxt.time - prev.time) or 0
+			local eased = TweenService:GetValue(alpha, EasingStyleMap[nxt.style] or Enum.EasingStyle.Linear, EasingDirectionMap[nxt.dir] or Enum.EasingDirection.InOut)
+			
+			prev.motor.Transform = prev.cframe:Lerp(nxt.cframe, eased)
+		end
+	end)
+	
+	return {
+		Length = totalLen,
+		Stop = function() 
+			playing = false
+			if hb then 
+				hb:Disconnect() 
+				hb = nil 
+			end 
+		end,
+		Play = function() startT = os.clock() end
+	}
+end
